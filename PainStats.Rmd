@@ -1,0 +1,256 @@
+---
+title: "Pain Level Project"
+author: "Erik Doty"
+date: "3/10/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+main.table <- read.csv("./main.table.csv") # main Table dervied from PainProject.Rmd
+```
+
+# Figure One
+<img src="/Users/erikdoty/Desktop/Harvard/MIMIC/figure1.png" />
+
+# Methods
+Our study utilized the Multiparameter Intelligent Monitoring in Intensive Care (MIMIC-III) research database. MIMIC is a publicly available database of greater than 40,000 critical care patients from Beth Israel Deaconess Medical Center. 
+
+Amongst the 46,520 patients admitted to the ICU in the database, 1,917 underwent coronary artery bypass graft (CABG). These patients were identified using the Current Procedural Terminology (CPT) code set. The following CPT codes correspond to the CABG procedure: 33510 to 33516 correspond to venous grafting only and 33533 to 33548 correspond to arterial grafting. We then selected the patients who were extubated with in 24 hours following surgery. This left us with our final study cohort of 844 patients.
+
+The primary outcome assessed was hospital length of stay. Secondary outcomes included death within 30 days and 1 year of discharge. Each mortality value was stored as a binary indicator.
+
+The primary exposure of concern were subjective pain levels. These levels were recorded by nurses at the bedside and subsequently stored in MIMIC. Each patient reported multiple pain levels throughout their stay. These levels were quantified using means, medians, and maximums. Presence of delirium was extracted as a secondary exposure. Presence of delirium was obtained by searching for any mention of "delirium", "delirious", "confusion", or "confused" in the clincial nursing notes while simultaneously excluding any negative mention of these terms. Additional delirium cases were found using the delirium assessment present in the database. 
+
+Several different covaraites were identified. Demographic information such as age and sex were extracted. Comorbidities were identified using the elixhauser index. Severity was identified using the Oxford Acute Severity of Illness Score (OASIS). OASIS takes into account Heart rate, Glasgow coma scale, mean arterial pressure, temperature, respiratory rate, ventilation status, urine output, elective surgery, pre-ICU in-hospital length of stay, and age. CABG procedures were further subdivided into those done with extra-corporeal circulation and those without. These were identified using the ICD9 code 3961.
+
+Analysis was carried out using R statistical software. Linear regression was used to model the relationship between our different pain measures and hospital length of stay. Logistic regression was used for 30 day and 1 year mortality and their relationship to our pain measures. We ran two separate sensitivity analyses. Our first was to determine if including all patients regardless of intubation length affected the results. The second sensitivity analysis excluded patients that expired in the hospital. We ran two additional analysis to determine the validity of our cohort. The first was a falsification hypothesis test in which we looked to see if nausea was associated with our outcomes. If the test showed no relationship it would add to the strength of our cohort. Our second analysis looked if delirium was associated with worse outcomes, which past studies have shown is true. This relationship, if true in our cohort, would also contribute to the strength of our cohort.
+
+# Tables
+
+## Table 1: Summary of cohort
+
+<img src="/Users/erikdoty/Desktop/Harvard/MIMIC/table1.png" />
+
+```{r echo = F}
+library(tableone)
+
+# Assign round mean pain levels to one of four categories
+# No pain (0), mild pain (1-3), moderate pain (4-6), severe pain (7+)
+# Categorized according to http://painconsortium.nih.gov/pain_scales/NumericRatingScale.pdf
+
+main.table$Pain.Scale <- NA
+for(i in 1:nrow(main.table)){
+  if(round(main.table$mean.pain[i]) == 0){main.table$Pain.Scale[i] <-  "No Pain"}
+  if(round(main.table$mean.pain[i]) >= 1 & round(main.table$mean.pain[i]) <= 3){main.table$Pain.Scale[i] <- "Mild"}
+  if(round(main.table$mean.pain[i]) >= 4 & round(main.table$mean.pain[i]) <= 6){main.table$Pain.Scale[i] <- "Moderate"}
+  if(round(main.table$mean.pain[i]) >= 7){main.table$Pain.Scale[i] <- "Severe"}}
+
+main.table$Pain.Scale <- as.factor(main.table$Pain.Scale)
+main.table$Pain.Scale <- relevel(main.table$Pain.Scale, ref = "No Pain", levels = c("No Pain", "Mild", "Moderate", "Severe"))
+
+listVars <- c("age", "gender", "oasis", "e_score", "pump", "nausea", "delirium", "hospital_expire_flag", "X30_day", "X1_yr")
+catVars <- c("gender", "e_score", "pump","hospital_expire_flag", "X30_day", "X1_yr", "nausea", "delirium")
+table1 <- CreateTableOne(vars = listVars, data = main.table[which(main.table$ventdur <=24),], factorVars = catVars, strata = "Pain.Scale")
+
+
+
+tab1mat <- print(table1, exact = "stage", quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+
+write.csv(tab1mat, file = "~/Desktop/myTable.csv")
+```
+
+## Length of stay models for mean, median, max and categorical pain
+
+### Mean Pain
+```{r echo = F}
+los_model.mean <- glm(hosp_los~mean.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),])
+summary(los_model.mean)
+```
+
+### Median Pain
+```{r echo = F}
+los_model.med <- glm(hosp_los~med.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),])
+summary(los_model.med)
+```
+
+### Max Pain
+```{r echo = F}
+los_model.max <- glm(hosp_los~max_pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),])
+summary(los_model.max)
+```
+
+### Length of stay model using categorical pain vairable
+```{r echo = F}
+los_model.cat <- glm(hosp_los~Pain.Scale+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),])
+summary(los_model.cat)
+```
+
+## 30 Day mortality models for mean, median, max and categorical pain
+
+### Mean
+```{r echo = F}
+day30mod.mean <- glm(X30_day~mean.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(day30mod.mean)
+```
+
+### Median
+```{r echo = F}
+day30mod.med <- glm(X30_day~med.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(day30mod.med)
+
+
+```
+
+### Max
+```{r echo = F}
+day30mod.max <- glm(X30_day~max_pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(day30mod.max)
+```
+
+### Categorical pain
+```{r echo = F}
+day30mod.cat <- glm(X30_day~Pain.Scale+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(day30mod.cat)
+```
+
+## 1 Year Models for mean, median max and categorical pain
+
+### Mean
+```{r echo = F}
+yr_mod.mean <- glm(X1_yr~mean.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(yr_mod.mean)
+
+
+```
+
+### Median
+```{r echo = F}
+yr_mod.med <- glm(X1_yr~med.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(yr_mod.med)
+```
+
+### Max
+```{r echo = F}
+yr_mod.max <- glm(X1_yr~max_pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(yr_mod.max)
+```
+
+### Categorical variable
+```{r echo = F}
+yr_mod.cat <- glm(X1_yr~Pain.Scale+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(yr_mod.cat)
+```
+
+## Sensitivity Test 1: Rerun mean and categorical models with no intubation limits.
+
+### Mean Pain
+### + Length of stay
+```{r echo =F}
+los_model2 <- glm(hosp_los~mean.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table)
+summary(los_model2)
+```
+### + 30 Day
+```{r echo = F}
+day30mort2 <- glm(X30_day~mean.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table, family = "binomial")
+summary(day30mort2)
+```
+### + One Year
+```{r echo = F}
+yr_mort2 <- glm(X1_yr~mean.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table, family = "binomial")
+summary(yr_mort2)
+```
+
+### Categorical Pain
+### + Length of Stay
+```{r echo = F}
+los_model2 <- glm(hosp_los~Pain.Scale+age+as.factor(gender)+e_score+pump+oasis, data = main.table)
+summary(los_model2)
+```
+
+### + 30 day mortality
+```{r echo = F}
+day30mort2 <- glm(X30_day~Pain.Scale+age+as.factor(gender)+e_score+pump+oasis, data = main.table, family = "binomial")
+summary(day30mort2)
+```
+
+### + One year Mortality
+```{r echo = F}
+yr_mort2 <- glm(X1_yr~Pain.Scale+age+as.factor(gender)+e_score+pump+oasis, data = main.table, family = "binomial")
+summary(yr_mort2)
+```
+
+
+## Sensitivity Analysis 2: Rerun mean and categorical models excluding those who expired in the hospital
+
+### Mean pain
+### + Length of stay model
+```{r echo = F}
+los_model3 <- glm(hosp_los~mean.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$hospital_expire_flag == 0),])
+summary(los_model3)
+```
+
+### + 30 day model
+```{r echo = F}
+day30mort3 <- glm(X30_day~mean.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$hospital_expire_flag == 0),], family = "binomial")
+summary(day30mort3)
+```
+
+### + One year model
+```{r echo = F}
+yr_mort3 <- glm(X1_yr~mean.pain+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$hospital_expire_flag == 0),], family = "binomial")
+summary(yr_mort3)
+```
+
+### Categorical Pain
+### + Length of stay model
+```{r echo = F}
+los_model3 <- glm(hosp_los~Pain.Scale+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$hospital_expire_flag == 0),])
+summary(los_model3)
+```
+
+### + 30 day model
+```{r echo = F}
+day30mort3 <- glm(X30_day~Pain.Scale+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$hospital_expire_flag == 0),], family = "binomial")
+summary(day30mort3)
+```
+
+### + One year model
+```{r echo = F}
+yr_mort3 <- glm(X1_yr~Pain.Scale+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$hospital_expire_flag == 0),], family = "binomial")
+summary(yr_mort3)
+```
+
+### Length of stay and delirium
+```{r echo = F}
+los_model_delirium <- glm(hosp_los~delirium+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),])
+summary(los_model_delirium)
+```
+
+### + delirium and one year mortality
+```{r echo = F}
+yr_mort_delirium <- glm(X1_yr~delirium+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(yr_mort_delirium)
+```
+
+## Falisfication testing - Nausea
+
+### Length of stay and nausea
+```{r echo = F}
+los_model_nausea <- glm(hosp_los~nausea+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),])
+summary(los_model_nausea)
+```
+
+### +nausea  and 30 day mortality
+```{r echo = F}
+day30mort_nausea <- glm(X30_day~nausea+age+as.factor(gender)+e_score+pump+oasis, data = main.table[which(main.table$ventdur <=24),], family = "binomial")
+summary(day30mort_nausea)
+```
+
+
+# Summary of Results
+Increased mean and median pain was found to decrease total hospital length of stay, 30 day and one year mortality. Maximum pain was found to be associated with decreased mortality, however it had a slight association with length of stay in which it increased the stay. Increased associations were seen when viewing pain as a categorical variable.
+
+Our first sensitivity analysis, in which we included all intubation lengths, we saw a decreased association but still significant with respects to with mean pain compared to length of stay and 30 day mortality. Mean pain was still negatively associated with one year mortality, however this model was no longer significant. When viewing pain as a categorical variable, we see that all levels are still significantly associated with length of of stay. Only mild and moderate pain are significantly related to 30 day and one year mortality. 
+
+In our second sensitivity analysis we eliminated those who expired in the hospital. We found that mean pain and categorical pain was still associated with length of stay. For mean pain we see that the association is no longer significant with respect to 30 day and one year mortality. We actually see a slight positive association in our one year mortality model, although it is not significant. We see no significant associations with respect to categorical pain and our one year and 30 day models. 

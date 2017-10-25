@@ -1,0 +1,429 @@
+---
+title: "MIMIC Pain Level Analysis"
+author: "Erik Doty"
+date: "February 17, 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(mgcv)
+library(dplyr)
+# install.packages("RPostgreSQL") ##Install package if needed
+require("RPostgreSQL")
+library(stringr)
+```
+
+## Background
+The following markdown is designed to search through the mimic database and find all patients who underwent CABG procedure. These patients will be found using CPT codes. The corresponding patients and there associated pain levels will also be searched for. We will use the MIMIC database to find additional factors such as medications used to sedate the pateint, surgical complications. Our goal is to see if these pain levels are potentially associated with worse patient outcomes. The outcomes of interest are hospital length of stay, 30 day mortality rate, and 1 year mortality rate. 
+
+## Analysis Table Build
+The first chunk of code allows R to conenct to MIMIC database 
+```{r echo = F}
+# loads the PostgreSQL driver
+drv <- dbDriver("PostgreSQL") 
+# creates a connection to the postgres database (MIMIC)
+# note that "con" will be used later in each connection to the database
+con <- dbConnect(drv, dbname = "mimic",
+                 host = "localhost", port = 5432,
+                 user = "postgres", forceISOdate = T) # password and username were specific to my 
+                                          # computer, removed here
+
+dbGetQuery(con, "set search_path to mimiciii")
+```
+
+The following code chunks use tables derived from the MIMIC database to create a dataframe with all the variables of interest for each patient.
+
+Search through d_items table to derive how pain is recorded in MIMIC
+```{r echo = T}
+#pain_items <- items <- dbGetQuery(con, "select * from d_items where label like  '%pain%' or label like '%Pain%'")
+#pain_items
+```
+Looking at the table these are the following item_ids that will be used to obtain pain level from the chartevents tables: 1044(Pain Level), 1045(Pain Level/Response), 225813(Baseline pain level), 224409, 227881 (Pain (0-10)), 223791 (Pain Level)
+
+Selects all those pain levels from the chartevents table and convert all measures to the same format
+```{r echo = T}
+pain_table <- dbGetQuery(con, "select * from mimiciii.chartevents where itemid  in (1044, 1045, 225813, 224409, 227881, 223791) and hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+for(i in 1:nrow(pain_table)){
+  if(length(
+  unique(na.omit(as.numeric(unlist(strsplit(unlist(pain_table$value[i]), 
+                                            "[^0-9]+")))))) == 1){
+    pain_table$valuenum[i] <- unique(na.omit(as.numeric(unlist(strsplit(unlist(pain_table$value[i]), 
+                                                                 "[^0-9]+")))))
+  }
+  if(length(
+    unique(na.omit(as.numeric(unlist(strsplit(unlist(pain_table$value[i]), 
+                                              "[^0-9]+")))))) == 2){
+                      pain_table$valuenum[i] <- 0
+                                              }
+}
+
+head(pain_table)
+qplot(x = valuenum, data = pain_table, geom = "histogram") + ggtitle("Pain level Hist")
+```
+
+Creates table of all ICU stays for CABG pts and formats to later be merged
+```{r echo=T}
+icu_stay_table <- dbGetQuery(con, "select subject_id, hadm_id, icustay_id, intime, los from icustays where hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+
+colnames(icu_stay_table) <- c("subject_id", "hadm_id", "icustay_id", "icu_los")
+
+ventduration <- dbGetQuery(con, "select icustay_id, duration_hours from ventdurations")
+
+## Add ventdurations to icu_stay_table
+icu_stay_table$ventdur <- NA # Create ventduration column
+for(i in 1:nrow(icu_stay_table)){
+  if(!length(ventduration$duration_hours[which(ventduration$icustay_id == icu_stay_table$icustay_id[i])]) == TRUE){icu_stay_table$ventdur[i] <- 0} # If not ventilated prior to icu admission
+  else{icu_stay_table$ventdur[i] <- ventduration$duration_hours[which(ventduration$icustay_id == icu_stay_table$icustay_id[i])]}
+}
+
+# Aggregate data in ICU stays to be total length of ICU stay. Will accomplish
+# Using sum function. Necessary as icu_stay_table contains multiple ICU admissions
+# Some patients were most likely readmitted to ICU
+icu_stay_table <- aggregate(cbind(ventdur,icu_los)~hadm_id, data = icu_stay_table, sum)
+
+```
+
+Create CPT code table, and aggregate by admission
+```{r echo=T}
+CPT.codes <- dbGetQuery(con, "select hadm_id, cpt_number 
+                              from cptevents where cpt_number 
+                              BETWEEN 33510 and 33516 or cpt_number between 
+                              33533 and 33548")
+CPT.codes <- aggregate(cpt_number ~ hadm_id, data = CPT.codes, toString)
+```
+
+Create a table of all patient ages, another variable that will need to be controlled for
+```{r echo = T}
+age.table <- dbGetQuery(con, "select subject_id, hadm_id, age, gender 
+                              from icustay_detail where hadm_id in 
+                              (select hadm_id from cptevents where cpt_number 
+                              BETWEEN 33510 and 33516 or cpt_number 
+                              between 33533 and 33548)")
+# Remove duplicates
+age.table <- age.table[-which(duplicated(age.table$hadm_id)),]
+```
+
+Total sample size
+```{r echo = T}
+length(unique(pain_table$hadm_id)) # All CABG patients
+```
+
+Calculate mean, median, and max pains for patient  hospital stay. Return histogram of findings
+```{r echo = T}
+avg.pain <- aggregate(valuenum ~ hadm_id, data = pain_table, mean)
+colnames(avg.pain) = c("hadm_id", "mean.pain")
+qplot(x = round(mean.pain), data = avg.pain, geom = "histogram") + ggtitle("Avg Pain level Hist")
+
+max.pain <- aggregate(valuenum ~ hadm_id, data = pain_table, max)
+colnames(max.pain) = c("hadm_id", "max_pain")
+max.pain$max_pain <- as.numeric(max.pain$max_pain)
+qplot(x = max_pain, data = max.pain, geom = "histogram") + ggtitle(" Max Pain level Hist")
+
+med.pain <- aggregate(valuenum ~ hadm_id, data = pain_table, median)
+colnames(med.pain) = c("hadm_id", "med.pain")
+med.pain$med.pain <- as.numeric(med.pain$med.pain)
+
+qplot(x = med.pain, data = med.pain, geom = "histogram")
+```
+
+Create admission data table, will be used to calculate length of stay and mortality rates
+```{r echo=T}
+adm_table <- dbGetQuery(con, "select subject_id, hadm_id, admittime, dischtime, hospital_expire_flag from admissions where hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+# Creates new column that will be the total hospital length of stay
+adm_table$hosp_los <- NA
+# For loop calculates length of stay
+for(i in 1:nrow(adm_table)){
+  adm_table$hosp_los <- as.numeric(difftime(adm_table$dischtime,
+                        adm_table$admittime, units = "days"))}
+
+```
+
+Extracting OASIS scores from MIMIC
+```{r echo = T}
+oasis <- dbGetQuery(con, "select subject_id, oasis from oasis where
+                     subject_id in (select subject_id from 
+                     cptevents where cpt_number BETWEEN 33510 and 33516 or
+                     cpt_number between 33533 and 33548)")
+
+# Eliminates duplicates in oasis
+oasis <- oasis[-which(duplicated(oasis$subject_id)),]
+```
+
+Sort through MIMIC for mentions of Nausea 
+```{r echo = T}
+# install.packages("stringr")
+library(stringr)
+
+# Table of all free written notes
+CABGnotes <- dbGetQuery(con, "select * from noteevents where hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+
+# Only Nursing notes
+nursing.notes <- CABGnotes[grep("Nursing", CABGnotes$category),]
+nursing.notes$text <- tolower(nursing.notes$text) # convert all text to lower case
+nursing.notes <- nursing.notes[,c(3,11)] # Take only hadm_id and text
+nursing.notes <- aggregate(text ~ hadm_id, data = nursing.notes, toString)
+
+# Search for mention of nausea
+n <- which(grepl("nausea", nursing.notes$text) & !grepl("no nausea", nursing.notes$text) & !grepl("denies nausea", nursing.notes$text)& !grepl("- nausea", nursing.notes$text)& !grepl("-nausea", nursing.notes$text)& !grepl("neg nausea", nursing.notes$text))
+n2 <- which(grepl("nauseous", nursing.notes$text)& !grepl("not nauseous", nursing.notes$text))
+nausea.idx <- unique(c(n, n2))
+length(nausea.idx)
+nausea.table <- data.frame(hadm_id = NA, nausea = NA)
+nausea.table[1:nrow(nursing.notes),] = NA
+nausea.table$hadm_id <- nursing.notes$hadm_id
+
+nausea.table$nausea[nausea.idx] <- 1
+nausea.table$nausea[-nausea.idx] <- 0
+
+nausea.ce <- dbGetQuery(con, "select * from chartevents where itemid in (1430, 1922, 1932, 6852, 224676, 223805) and hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)" )
+
+head(nausea.ce)
+
+nausea.ce <- aggregate(value ~ hadm_id, data = nausea.ce, toString)
+nausea.ce$value <- tolower(nausea.ce$value)
+
+nausea.tab2 <- data.frame(hadm_id = NA, nausea = NA)
+nausea.tab2[1:nrow(nausea.ce),] = NA
+nausea.tab2$hadm_id <- nausea.ce$hadm_id
+nausea.idx2 <- which(grepl("mild", nausea.ce$value) | grepl("intense", nausea.ce$value))
+nausea.tab2$nausea[nausea.idx2] <- 1 
+nausea.tab2$nausea[-nausea.idx2] <- 0
+sum(nausea.tab2$nausea)
+nausea.table <- rbind(nausea.table, nausea.tab2)
+nausea.table <- nausea.table[-which(duplicated(nausea.table$hadm_id)),]
+```
+
+
+Sort through discharge notes for mentions of delirium
+```{r echo = T}
+# install.packages("stringr")
+library(stringr)
+CABGnotes <- dbGetQuery(con, "select * from noteevents where hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+distcabg <-  aggregate(text ~ hadm_id, data = CABGnotes, toString)
+nursing.notes <- CABGnotes[grep("Nursing", CABGnotes$category),]
+nursing.notes$text <- tolower(nursing.notes$text) # convert all text to lower case
+nursing.notes <- nursing.notes[,c(3,11)] # Take only hadm_id and text
+nursing.notes <- aggregate(text ~ hadm_id, data = nursing.notes, toString)
+
+
+
+# Search for mention of delirium
+x <- which(grepl("delirium", nursing.notes$text) & !grepl("not delirium", nursing.notes$text) & !grepl("- delirium", nursing.notes$text))
+x2 <- which(grepl("delirious", nursing.notes$text))
+x3 <- which(grepl("confused", nursing.notes$text) & !grepl("not confused", nursing.notes$text))
+x4 <- which(grepl("confusion", nursing.notes$text) & !grepl("no confusion", nursing.notes$text))
+
+del.idx <- unique(c(x,x2,x3,x4))
+length(del.idx)
+delirium.table <- data.frame(hadm_id = NA, delirium = NA)
+delirium.table[1:nrow(nursing.notes),] = NA
+delirium.table$hadm_id <- nursing.notes$hadm_id
+
+delirium.table$delirium[del.idx] <- 1
+delirium.table$delirium[-del.idx] <- 0
+
+# Add delirium assessment from chartevents table
+delirium.assessment <- dbGetQuery(con, "select * from chartevents where itemid = 228332 and hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+
+
+del_table <- data.frame(hadm_id = NA, delirium = NA)
+del_table[1:81,] <- NA
+del_table$hadm_id <- unique(delirium.assessment$hadm_id[which(delirium.assessment$value == "Positive")])
+del_table$delirium <- 1
+delirium.table <- rbind(del_table, delirium.table)
+
+sum(delirium.table$delirium)
+```
+
+
+Elixhauser score 
+```{r echo = T}
+elix <- dbGetQuery(con, "select * from mimiciii.elixhauser_ahrq where hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+
+elix$e_score <- apply(elix[,3:32], 1, sum)
+```
+
+Distinguish between on vs off pump procedures by using ICD 9 code (3961)
+```{r echo = T}
+p_icd <-  dbGetQuery(con, "select * from mimiciii.procedures_icd where hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+
+pump <- data.frame(hadm_id = unique(p_icd$hadm_id), pump = NA)
+
+on.off.fun <- function(x){
+  if(3961 %in% p_icd$icd9_code[which(p_icd$hadm_id == pump$hadm_id[x])] == T){
+    return(1)}
+  if(3961 %in% p_icd$icd9_code[which(p_icd$hadm_id == pump$hadm_id[x])] == F){
+    return(0)}}
+
+for(i in 1:nrow(pump)){
+  pump$pump[i] = on.off.fun(i)
+}
+
+#Proportion of procedures on pump vs off
+sum(pump$pump/nrow(pump)) # 96% of procedures were on pump
+```
+
+Select all the GCS values in MIMIC. GCS recorded differently if metavision or carvue system. carevue recorded total GCS, metavision recorded individual category scores. Select Mean, med, max
+```{r echo = T}
+# Carevue
+GCS_table1 <- dbGetQuery(con, "select hadm_id, value from chartevents where itemid = 198 and hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+
+# Metavision
+GCS_table2 <- dbGetQuery(con, "select * from chartevents where itemid in (220739, 223900, 223901) and hadm_id in (select hadm_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+
+# Following chunck used to sum all GCS categories in GCS_table2 to gather total scores. Collects also 
+GCS_table2 <- GCS_table2 %>% group_by(hadm_id, charttime) %>% summarise(sum(valuenum), length(valuenum))
+
+# Eliminate unnecessarty columns and incomplete measurements of GCS
+GCS_table2 <- GCS_table2[which(GCS_table2$`length(valuenum)` == 3),c(-2, -4)]
+colnames(GCS_table2) <- c("hadm_id", "value")
+GCS_table2 <- as.data.frame(GCS_table2)
+
+GCS_table1$value <- as.numeric(GCS_table1$value)
+#Combine into single GCS table
+GCS <- bind_rows(GCS_table1, GCS_table2)
+
+GCS_agg <- GCS %>% group_by(hadm_id) %>% summarise(mean(value), min(value), max(value))
+colnames(GCS_agg) <- c("hadm_id", "mean.GCS", "min.GCS", "max.GCS")
+```
+
+Merge all tables into one main.table, will be used to run analysis
+```{r echo = T}
+main.table <- merge(x = icu_stay_table, y = avg.pain, 
+                    all.x = F, all.y = T)
+main.table <- merge(x = max.pain, y = main.table, all.x = F, all.y = T)
+main.table <- merge(x = age.table, y = main.table, all.x = F, all.y = T)
+main.table <- merge(x = CPT.codes, y = main.table, all.x = F, all.y = T)
+main.table <- merge(x = main.table, y = adm_table[,c(2,3,5,6)], all.x = T, all.y = F)
+main.table <- merge(x = main.table, y = oasis, all.x = T, all.y = F)
+main.table <- merge(x = main.table, y = elix[,c(2,33)], all.x = T, all.y = F)
+main.table <- merge(x = main.table, y = pump, all.x = T, all.y = F)
+
+# Add GCS table
+main.table <- merge(x = main.table, y = GCS_agg, all.x = T, all.y = F)
+
+
+# Sets pts >89 yo (300 yo in database) to the median of 91.4
+main.table$age[which(main.table$age > 300)] <- 91.4
+
+main.table <- merge(x = med.pain, y = main.table, all.x = T, all.y = F)
+main.table <- merge(x = main.table, y = nausea.table, all.x = T, all.y = F)
+main.table$nausea[which(is.na(main.table$nausea))] <- 0
+
+main.table <- merge(x = main.table, y = delirium.table, all.x = T, all.y = F)
+main.table$delirium[which(is.na(main.table$delirium))] <- 0 # assume NA values which had no mention of delirium in notes or 
+```
+
+Calculating 30 day and 1 year mortality
+```{r echo = T}
+CABGpatient_table <- dbGetQuery(con, "select subject_id, dod, expire_flag from patients where subject_id in (select subject_id from cptevents where cpt_number BETWEEN 33510 and 33516 or cpt_number between 33533 and 33548)")
+
+# Function caluculates number of days to death
+mortality.days.fun <- function(x){
+as.numeric(difftime(CABGpatient_table$dod[which(CABGpatient_table$subject_id == 
+                              main.table$subject_id[x])],
+adm_table$dischtime[which(adm_table$subject_id == 
+                            main.table$subject_id[x])], units ="days"))
+}
+
+
+main.table$'30_day' <- NA # Initializes 30 day mortality column
+main.table$'1_yr' <- NA # Initializes 1 year mortality column
+
+#30 day loop
+# 0 if died with in 30 days, 1 if not
+for(i in 1:nrow(main.table)){
+  # First if statement: 
+  # If the patient has not yet, expired, enters 0 for 30 day
+  # Necessary to avoid NA statements in the proceding if statements
+  if(CABGpatient_table$expire_flag[which(CABGpatient_table$subject_id == 
+                                         main.table$subject_id[i])] == 0){
+    main.table$`30_day`[i] <- 0
+  }
+  else{
+    
+    # Following if statement:
+    # If patient expired in hosptial, marks 30 day and 1yr mortality 
+    # in Main.table
+    
+    if(main.table$hospital_expire_flag[i] == 1){
+      main.table$`30_day`[i] <- 1
+      }
+    
+    # Following if statements:
+    # Calculates time between discharge and time of expiration
+    
+    # First if statement:
+    # If DOD less than thirty days from discharge markes 1 in 30 day and 1 yr mortality in 
+    # Main.table
+    
+    if(mortality.days.fun(i) <= 30){
+      main.table$`30_day`[i] <- 1
+    }
+
+    # Following else statement encompasses patients that expired after 30 days
+    else{
+      main.table$`30_day`[i] <- 0
+    }  
+  }
+}
+
+# 1 yr loop
+# For loop to calculate 1 year mortality and store in main table as 
+# binary (1 if expire w/in 365 days; 0 if no)
+
+for(i in 1:nrow(main.table)){
+  # First if statement: 
+  # If the patient has not yet, expired, enters 0 in 1 yr mortality
+  # Necessary to avoid NA statements in the proceding if statements
+  if(CABGpatient_table$expire_flag[which(CABGpatient_table$subject_id == 
+                                         main.table$subject_id[i])] == 0){
+    main.table$`1_yr`[i] <- 0  
+  }
+  else{
+    
+    # Following if statement:
+    # If patient expired in hosptial, marks 30 day and 1yr mortality 
+    # in Main.table
+    
+    if(main.table$hospital_expire_flag[i] == 1){
+      main.table$`1_yr`[i] <- 1}
+    
+    # Following if statements:
+    # Calculates time between discharge and time of expiration
+    
+    # First if statement:
+    # If DOD less than 365 from discharge markes 1 in 1 yr mortality in 
+    # Main.table
+    
+    if(mortality.days.fun(x = i) <= 365){
+      main.table$`1_yr`[i] <- 1                            
+    }
+    
+    # Following else statement encompasses patients that expired after 1 year
+    else{
+      main.table$`1_yr`[i] <- 0 
+    }  
+  }
+}
+```
+
+Main Table
+```{r echo = F}
+write.csv(main.table, "./main.table.csv")
+
+head(main.table)
+
+qplot(main.table$ventdur, shape = "histogram", binwidth = 12) # Histogram of ventilation durations
+length(which(main.table$ventdur <= 24)) # Number of cases where vent duration is less than 24 hrs, 821
+qplot(main.table$age, shape = "histogram", binwidth = 1)
+qplot(round(main.table$mean.pain), shape = "histogram")
+
+# Save hadm_id from cohort to use in medication extraction
+write.csv(main.table$hadm_id, "./cohort_hadmi_id.csv")
+
+```
